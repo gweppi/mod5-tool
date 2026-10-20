@@ -5,11 +5,12 @@ from scipy.optimize import brentq
 from scipy.stats import norm
 import streamlit as st
 import yfinance as yf
+import plotly.express as px
 
 st.set_page_config(layout="wide", page_title="Oil & Gas Options Pricing Dashboard")
 
 st.title(
-    "🛢️ Oil/Gas Option Pricing, Black-Scholes, Monte Carlo & Implied Volatility"
+    "Oil/Gas Option Pricing, Black-Scholes, Monte Carlo & Implied Volatility"
 )
 
 # --- 1. Math Functions ---
@@ -56,7 +57,15 @@ def implied_volatility_call(market_price, S, K, T, r):
 
 # --- Sidebar Inputs ---
 st.sidebar.header("Model Parameters")
-ticker = st.sidebar.selectbox("Select Asset", ["CL=F", "BZ=F", "NG=F"])
+# Map human-readable names to yfinance ticker symbols
+ticker_map = {
+    "WTI Crude Oil (CL=F)": "CL=F",
+    "Brent Crude (BZ=F)": "BZ=F",
+    "Henry Hub Natural Gas (NG=F)": "NG=F",
+}
+
+selected_name = st.sidebar.selectbox("Select Asset", list(ticker_map.keys()))
+ticker = ticker_map[selected_name]
 spot_price = st.sidebar.number_input("Spot Price ($)", value=75.0, step=1.0)
 strike_price = st.sidebar.number_input(
     "Strike Price (K) for Pricing", value=75.0, step=1.0
@@ -73,7 +82,7 @@ volatility = st.sidebar.slider(
 @st.cache_data
 def fetch_market_data(ticker_symbol):
   tk = yf.Ticker(ticker_symbol)
-  return tk.history(period="6mo")
+  return tk.history(period="5y")
 
 
 data = fetch_market_data(ticker)
@@ -102,7 +111,7 @@ with col2:
   )
 
 # --- NEW: Implied Volatility Solver Module ---
-st.subheader("🔍 Implied Volatility Solver")
+st.subheader("Implied Volatility Solver")
 st.markdown(
     "Input an observed market option price below to calculate its Black-Scholes"
     " Implied Volatility:"
@@ -136,8 +145,25 @@ with col_iv2:
     )
 
 # --- Historical Data Chart ---
-st.subheader(f"Historical Price Trend for {ticker}")
-st.line_chart(data["Close"])
+st.subheader(f"Historical Price Trend for {selected_name}")
+fig_hist = px.line(
+    data,
+    y="Close",
+    title=f"5-Year Historical Price Trend for {selected_name}",
+    labels={"index": "Date", "Close": "Price ($)"},
+)
+
+min_date = data.index.min()
+max_date = data.index.max()
+min_price = data["Close"].min() * 0.95
+max_price = data["Close"].max() * 1.05
+
+fig_hist.update_xaxes(minallowed=min_date, maxallowed=max_date)
+fig_hist.update_yaxes(minallowed=min_price, maxallowed=max_price)
+
+st.plotly_chart(
+    fig_hist, use_container_width=True, config={"displayModeBar": False}
+)
 
 # --- 3D Option Pricing Surface ---
 st.subheader("3D Black-Scholes Option Pricing Surface")
@@ -154,7 +180,10 @@ Z = np.array(
 ).reshape(X.shape)
 
 fig = go.Figure(
-    data=[go.Surface(z=Z, x=X, y=Y)],
+    data=[go.Surface(z=Z, x=X, y=Y, colorscale='Viridis', hovertemplate=(
+                "Strike Price: $%{x:.2f}<br>Time to Maturity: %{y:.2f}"
+                " yrs<br>Option Price: $%{z:.2f}<extra></extra>"
+            ),)],
     layout=go.Layout(
         title="Call Option Price Surface",
         scene=dict(
@@ -166,10 +195,12 @@ fig = go.Figure(
         height=600,
     ),
 )
-st.plotly_chart(fig, use_container_width=True)
+st.plotly_chart(fig, use_container_width=True, config={
+    "scrollZoom": False,
+    "modeBarButtonsToRemove": ["zoom3d", "pan3d"]})
 
 # --- Financial Stress Testing Module ---
-st.subheader("⚠️ Financial Stress Test Module")
+st.subheader("Financial Stress Test Module")
 stress_drop = st.slider("Simulated Underlying Price Drop (%)", 0, 50, 10)
 stressed_spot = spot_price * (1 - stress_drop / 100)
 stressed_bs_price = black_scholes_call(
