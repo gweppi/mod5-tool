@@ -1,16 +1,16 @@
 import numpy as np
 import pandas as pd
+import plotly.express as px
 import plotly.graph_objects as go
 from scipy.optimize import brentq
 from scipy.stats import norm
 import streamlit as st
 import yfinance as yf
-import plotly.express as px
 
 st.set_page_config(layout="wide", page_title="Oil & Gas Options Pricing Dashboard")
 
 st.title(
-    "Oil/Gas Option Pricing, Black-Scholes, Monte Carlo & Implied Volatility"
+    "Oil/Gas Option Pricing, Black-Scholes, Monte Carlo & Volatility Surface"
 )
 
 # --- 1. Math Functions ---
@@ -36,36 +36,28 @@ def monte_carlo_call(S, K, T, r, sigma, num_sims=50000):
 
 
 def implied_volatility_call(market_price, S, K, T, r):
-  """Calculates the Black-Scholes implied volatility given a market option price
-
-  using Brent's root-finding method.
-  """
-  # Check basic arbitrage bounds
+  """Calculates Black-Scholes implied volatility using Brent's method."""
   if market_price <= max(0.0, S - K * np.exp(-r * T)):
     return np.nan
-
   def objective_function(sigma):
     return black_scholes_call(S, K, T, r, sigma) - market_price
-
   try:
-    # Search for volatility between 0.1% and 500%
-    iv = brentq(objective_function, 0.001, 5.0)
-    return iv
+    return brentq(objective_function, 0.001, 5.0)
   except ValueError:
     return np.nan
 
 
 # --- Sidebar Inputs ---
 st.sidebar.header("Model Parameters")
-# Map human-readable names to yfinance ticker symbols
+
 ticker_map = {
     "WTI Crude Oil (CL=F)": "CL=F",
     "Brent Crude (BZ=F)": "BZ=F",
     "Henry Hub Natural Gas (NG=F)": "NG=F",
 }
-
 selected_name = st.sidebar.selectbox("Select Asset", list(ticker_map.keys()))
 ticker = ticker_map[selected_name]
+
 spot_price = st.sidebar.number_input("Spot Price ($)", value=75.0, step=1.0)
 strike_price = st.sidebar.number_input(
     "Strike Price (K) for Pricing", value=75.0, step=1.0
@@ -75,15 +67,14 @@ time_to_maturity = st.sidebar.slider(
 )
 risk_free_rate = st.sidebar.slider("Risk-Free Rate (r)", 0.0, 0.1, 0.04, 0.01)
 volatility = st.sidebar.slider(
-    "Input Volatility (sigma) for Pricing", 0.05, 1.0, 0.25, 0.01
+    "Base Implied Volatility (sigma)", 0.05, 1.0, 0.25, 0.01
 )
 
-# --- Fetch Historical Data ---
+# --- Fetch Historical Data (5 Years) ---
 @st.cache_data
 def fetch_market_data(ticker_symbol):
   tk = yf.Ticker(ticker_symbol)
   return tk.history(period="5y")
-
 
 data = fetch_market_data(ticker)
 
@@ -110,13 +101,8 @@ with col2:
       delta=f"{((mc_price - bs_price) / bs_price) * 100:.2f}% vs BS",
   )
 
-# --- NEW: Implied Volatility Solver Module ---
+# --- Implied Volatility Solver Module ---
 st.subheader("Implied Volatility Solver")
-st.markdown(
-    "Input an observed market option price below to calculate its Black-Scholes"
-    " Implied Volatility:"
-)
-
 col_iv1, col_iv2 = st.columns(2)
 with col_iv1:
   market_option_price = st.number_input(
@@ -140,83 +126,104 @@ with col_iv2:
         value=f"{calculated_iv * 100:.2f}%",
     )
   else:
-    st.error(
-        "Invalid market price (violates arbitrage bounds or cannot converge)."
-    )
+    st.error("Invalid market price (violates arbitrage bounds).")
 
 # --- Historical Data Chart ---
-st.subheader(f"Historical Price Trend for {selected_name}")
 fig_hist = px.line(
     data,
     y="Close",
     title=f"5-Year Historical Price Trend for {selected_name}",
     labels={"index": "Date", "Close": "Price ($)"},
 )
-
-min_date = data.index.min()
-max_date = data.index.max()
-min_price = data["Close"].min() * 0.95
-max_price = data["Close"].max() * 1.05
-
+min_date, max_date = data.index.min(), data.index.max()
+min_price, max_price = data["Close"].min() * 0.95, data["Close"].max() * 1.05
 fig_hist.update_xaxes(minallowed=min_date, maxallowed=max_date)
 fig_hist.update_yaxes(minallowed=min_price, maxallowed=max_price)
-
 st.plotly_chart(
     fig_hist, use_container_width=True, config={"displayModeBar": False}
 )
 
-# --- 3D Option Pricing Surface ---
-st.subheader("3D Black-Scholes Option Pricing Surface")
+# --- UPDATED: 3D Implied Volatility Surface (Smile/Skew Model) ---
+st.subheader("3D Implied Volatility Surface Visualization")
+st.markdown(
+    "Mapping Implied Volatility across Strikes and Maturities (incorporating a"
+    " volatility skew)."
+)
 
 strikes = np.linspace(spot_price * 0.7, spot_price * 1.3, 20)
 expiries = np.linspace(0.05, 1.5, 20)
 X, Y = np.meshgrid(strikes, expiries)
 
-Z = np.array(
-    [
-        black_scholes_call(spot_price, k, t, risk_free_rate, volatility)
-        for k, t in zip(X.ravel(), Y.ravel())
-    ]
-).reshape(X.shape)
+# Simulating a realistic volatility skew/smile where OTM/ITM puts/calls have higher IV
+Z_iv = volatility + 0.1 * ((X - spot_price) / spot_price) ** 2 + 0.05 * (1.5 - Y)
 
-fig = go.Figure(
-    data=[go.Surface(z=Z, x=X, y=Y, colorscale='Viridis', hovertemplate=(
+fig_iv = go.Figure(
+    data=[
+        go.Surface(
+            z=Z_iv,
+            x=X,
+            y=Y,
+            colorscale="Viridis",
+            hovertemplate=(
                 "Strike Price: $%{x:.2f}<br>Time to Maturity: %{y:.2f}"
-                " yrs<br>Option Price: $%{z:.2f}<extra></extra>"
-            ),)],
+                " yrs<br>Implied Volatility: %{z:.2%}<extra></extra>"
+            ),
+        )
+    ],
     layout=go.Layout(
-        title="Call Option Price Surface",
+        title="Implied Volatility Surface",
         scene=dict(
             xaxis_title="Strike Price ($)",
             yaxis_title="Time to Maturity (Years)",
-            zaxis_title="Option Price ($)",
+            zaxis_title="Implied Volatility (sigma)",
         ),
         autosize=True,
         height=600,
     ),
 )
-st.plotly_chart(fig, use_container_width=True, config={
-    "scrollZoom": False,
-    "modeBarButtonsToRemove": ["zoom3d", "pan3d"]})
+st.plotly_chart(
+    fig_iv,
+    use_container_width=True,
+    config={"scrollZoom": False, "modeBarButtonsToRemove": ["zoom3d", "pan3d"]},
+)
 
-# --- Financial Stress Testing Module ---
-st.subheader("Financial Stress Test Module")
-stress_drop = st.slider("Simulated Underlying Price Drop (%)", 0, 50, 10)
-stressed_spot = spot_price * (1 - stress_drop / 100)
+# --- UPDATED: Multi-Factor Financial Stress Test Module ---
+st.subheader("Multi-Factor Financial Stress Test Module")
+st.markdown(
+    "Simulate market shocks across spot price, volatility, and interest rates"
+    " simultaneously:"
+)
+
+col_s1, col_s2, col_s3 = st.columns(3)
+with col_s1:
+  stress_spot_drop = st.slider("Spot Price Shock (%)", -50, 50, -10, 1)
+with col_s2:
+  stress_vol_change = st.slider("Volatility Shock (%)", -50, 100, 20, 5)
+with col_s3:
+  stress_rate_change = st.slider(
+      "Interest Rate Shock (bps)", -200, 200, 50, 25
+  )
+
+stressed_spot = spot_price * (1 + stress_spot_drop / 100)
+stressed_vol = max(0.01, volatility * (1 + stress_vol_change / 100))
+stressed_rate = max(0.0, risk_free_rate + (stress_rate_change / 10000))
+
 stressed_bs_price = black_scholes_call(
-    stressed_spot, strike_price, time_to_maturity, risk_free_rate, volatility
+    stressed_spot, strike_price, time_to_maturity, stressed_rate, stressed_vol
 )
 
 col3, col4 = st.columns(2)
 with col3:
   st.metric(
-      label="Stressed Spot Price",
-      value=f"${stressed_spot:.2f}",
-      delta=f"-{stress_drop}%",
+      label="Stressed Parameters",
+      value=(
+          f"Spot: ${stressed_spot:.2f} | Vol: {stressed_vol*100:.1f}% | Rate:"
+          f" {stressed_rate*100:.2f}%"
+      ),
   )
 with col4:
   st.metric(
-      label="Stressed Option Value",
+      label="Stressed Option Value (Black-Scholes)",
       value=f"${stressed_bs_price:.2f}",
-      delta=f"${stressed_bs_price - bs_price:.2f}",
+      delta=f"${stressed_bs_price - bs_price:.2f} vs Base",
   )
